@@ -1,0 +1,1 @@
+- Added native model failover: configure an ordered `fallbackModels` chain in settings or via `--fallback-models` to switch models and continue the same conversation once retries are exhausted on a retryable failure.

@@ -23,6 +23,7 @@ export const GLOBAL_VALUE_FLAGS: ReadonlySet<string> = new Set([
 	"--fork",
 	"--session-dir",
 	"--models",
+	"--fallback-models",
 	"--tools",
 	"-t",
 	"--thinking",

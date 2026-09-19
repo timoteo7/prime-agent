@@ -14,6 +14,7 @@ export interface AgentSessionRuntimeConfig {
 	appendSystemPrompt?: string[];
 	thinking?: ThinkingLevel;
 	models?: string[];
+	fallbackModels?: string[];
 	tools?: string[];
 	noTools?: boolean;
 	noBuiltinTools?: boolean;
@@ -78,6 +79,7 @@ export function mergeAgentSessionRuntimeConfig(
 		appendSystemPrompt: cloneArray(override.appendSystemPrompt ?? base.appendSystemPrompt),
 		thinking: override.thinking ?? base.thinking,
 		models: cloneArray(override.models ?? base.models),
+		fallbackModels: cloneArray(override.fallbackModels ?? base.fallbackModels),
 		tools: cloneArray(override.tools ?? base.tools),
 		noTools: override.noTools ?? base.noTools,
 		noBuiltinTools: override.noBuiltinTools ?? base.noBuiltinTools,
@@ -107,6 +109,7 @@ function cloneAgentSessionRuntimeConfig(config: AgentSessionRuntimeConfig): Agen
 		...config,
 		appendSystemPrompt: cloneArray(config.appendSystemPrompt),
 		models: cloneArray(config.models),
+		fallbackModels: cloneArray(config.fallbackModels),
 		tools: cloneArray(config.tools),
 		extensions: cloneArray(config.extensions),
 		skills: cloneArray(config.skills),

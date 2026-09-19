@@ -239,6 +239,7 @@ export interface Settings {
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
+	fallbackModels?: string[]; // Ordered "provider/model-id" failover chain (same format as --fallback-models CLI flag)
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default: "user-only"
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
@@ -1356,6 +1357,11 @@ export class SettingsManager {
 
 	getEnabledModels(): string[] | undefined {
 		return this.settings.enabledModels;
+	}
+
+	/** Ordered "provider/model-id" failover chain configured in settings. */
+	getFallbackModels(): string[] | undefined {
+		return this.settings.fallbackModels;
 	}
 
 	/** MCP execution is intentionally restricted to user/global settings. */

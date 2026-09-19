@@ -442,6 +442,17 @@ export type AgentSessionEvent =
 			restoredModel?: string;
 	  }
 	| {
+			type: "model_switch";
+			/** Previous model as `provider/id`. */
+			from: string;
+			/** New model as `provider/id`. */
+			to: string;
+			/** Provider failure that exhausted the retry policy on `from`. */
+			reason: string;
+			/** 1-based position of `to` within the configured fallback chain. */
+			attempt: number;
+	  }
+	| {
 			type: "auth_stale";
 			provider: string;
 			sourceTokens?: readonly AuthSourceToken[];
@@ -494,6 +505,13 @@ export interface AgentSessionConfig {
 	cwd: string;
 	agentDir?: string;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	/**
+	 * Ordered fallback chain (from fallbackModels settings / --fallback-models).
+	 * When the per-model retry policy is exhausted on a retryable-class failure,
+	 * the session advances to the next chain entry instead of failing terminally.
+	 */
+	fallbackModels?: Model<any>[];
+	/** Resource loader for skills, prompts, themes, context files, system prompt */
 	resourceLoader: ResourceLoader;
 	customTools?: ToolDefinition[];
 	modelRegistry: ModelRegistry;
@@ -1457,6 +1475,12 @@ export class AgentSession {
 	private _branchSummaryOperation: Promise<void> | undefined = undefined;
 
 	private _retryAbortController: AbortController | undefined = undefined;
+	/** Resolved fallback chain entries; empty when failover is not configured. */
+	private _fallbackModels: Model<any>[] = [];
+	/** Number of chain entries already consumed by failover in this session. */
+	private _fallbackIndex = 0;
+	/** Every model tried in the current failover run, with the failure that retired it. */
+	private _fallbackFailures: Array<{ model: string; failureClass: string }> = [];
 	private _retryAttempt = 0;
 	/** Bumped by every retry resolution; stale scheduled-continue callbacks check it before touching retry state. */
 	private _retryGeneration = 0;
@@ -1616,6 +1640,7 @@ export class AgentSession {
 		this.settingsManager = config.settingsManager;
 		this._serviceTierPreference = config.serviceTierPreference ?? config.agent.state.serviceTier;
 		this._scopedModels = config.scopedModels ?? [];
+		this._fallbackModels = config.fallbackModels ? [...config.fallbackModels] : [];
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
@@ -12614,6 +12639,94 @@ export class AgentSession {
 		return false;
 	}
 
+	/**
+	 * Replace the fallback chain. Entries are tried in order after the per-model
+	 * retry policy is exhausted on a retryable-class failure.
+	 */
+	setFallbackModels(models: Model<any>[]): void {
+		this._fallbackModels = [...models];
+		this._fallbackIndex = 0;
+		this._fallbackFailures = [];
+	}
+
+	/** Configured fallback chain, in order. */
+	get fallbackModels(): readonly Model<any>[] {
+		return this._fallbackModels;
+	}
+
+	private _modelSelector(model: Model<any> | undefined): string {
+		return model ? `${model.provider}/${model.id}` : "unknown";
+	}
+
+	/**
+	 * Classify why a model was retired, for the chain-exhaustion report.
+	 * Structured provider diagnostics win over error-message sniffing.
+	 */
+	private _failureClass(message: AssistantMessage): string {
+		const kind = this._getProviderStreamFailureKind(message);
+		if (kind) return kind;
+		const errorMessage = message.errorMessage ?? "";
+		if (/\b429\b|rate.?limit|too many requests/i.test(errorMessage)) return "rate_limit";
+		if (/\b5\d{2}\b|overloaded|unavailable|internal server/i.test(errorMessage)) return "server_error";
+		if (/timeout|timed out|network|connection/i.test(errorMessage)) return "network";
+		if (/cooldown/i.test(errorMessage)) return "cooldown";
+		return "error";
+	}
+
+	/**
+	 * Whether a retry-exhausted failure is eligible for model failover.
+	 * Auth and invalid-request failures are the caller's problem on every model,
+	 * so they must keep failing loudly instead of burning the chain.
+	 */
+	private _canFailoverToNextModel(message: AssistantMessage): boolean {
+		if (this._fallbackIndex >= this._fallbackModels.length) return false;
+		if (this._isStructuredPermanentProviderRetryExhausted(message)) return false;
+		if (this._isConcreteProviderAuthFailure(message)) return false;
+		if (this._isAgentLifecycleFailure(message)) return false;
+		if (this._isFauxProviderQueueExhausted(message)) return false;
+		return true;
+	}
+
+	/** Human-readable terminal report naming every model tried and its failure class. */
+	private _formatFallbackExhaustion(message: AssistantMessage): string {
+		const attempts = [
+			...this._fallbackFailures,
+			{ model: this._modelSelector(this.model), failureClass: this._failureClass(message) },
+		];
+		const tried = attempts.map((entry) => `${entry.model} (${entry.failureClass})`).join(", ");
+		return `All fallback models failed: ${tried}. Last error: ${message.errorMessage ?? "unknown error"}`;
+	}
+
+	/**
+	 * Advance to the next fallback chain entry, keeping the same conversation.
+	 * Budget counters are session-scoped and deliberately untouched here.
+	 */
+	private async _failoverToNextModel(message: AssistantMessage): Promise<boolean> {
+		const next = this._fallbackModels[this._fallbackIndex];
+		if (!next) return false;
+
+		const from = this._modelSelector(this.model);
+		const to = this._modelSelector(next);
+		const failureClass = this._failureClass(message);
+		const reason = message.errorMessage ?? failureClass;
+
+		try {
+			await this.setModel(next, { waitForExtensions: false });
+		} catch {
+			// An unusable chain entry must not strand the session: retire it and
+			// let the next _handleRetryableError call try the following entry.
+			this._fallbackIndex++;
+			this._fallbackFailures.push({ model: to, failureClass: "unavailable" });
+			return false;
+		}
+
+		this._fallbackIndex++;
+		this._fallbackFailures.push({ model: from, failureClass });
+		this.sessionManager.appendModelSwitch(from, to, reason, this._fallbackIndex);
+		this._emit({ type: "model_switch", from, to, reason, attempt: this._fallbackIndex });
+		return true;
+	}
+
 	private _finishActiveRetryWithFailure(message: AssistantMessage): void {
 		if (this._retryAttempt === 0) {
 			return;
@@ -12675,18 +12788,48 @@ export class AgentSession {
 		}
 
 		if (this._retryAttempt > settings.maxRetries) {
+			// Per-model retry policy is exhausted. Before waiting on an
+			// unavailable provider or failing terminally, try the next fallback
+			// chain entry on the same conversation.
+			if (this._canFailoverToNextModel(message)) {
+				const switched = await this._failoverToNextModel(message);
+				if (switched) {
+					// The new model starts with a fresh retry budget; re-issue
+					// the failed turn through the shared retry tail so the
+					// retry lifecycle (and prompt completion) stays coherent.
+					this._retryAttempt = 0;
+					this._retryAuthFailureSources = [];
+					return this._retryAfterDelay(
+						message,
+						options,
+						{
+							type: "auto_retry_start",
+							attempt: 1,
+							maxAttempts: settings.maxRetries,
+							delayMs: 0,
+							errorMessage: message.errorMessage || "Unknown error",
+							reason: "backup",
+							backupModel: this._modelSelector(this.model),
+						},
+						0,
+					);
+				}
+			}
+
 			// Quick retries exhausted on an unavailable provider: keep pinging
 			// with bounded exponential backoff instead of giving up.
 			if (waitClass === "transient" && waitPolicy.enabled) {
 				return this._handleProviderWait(message, options, waitPolicy, "unavailable");
 			}
+
 			this._markProviderAuthStaleForRetryFailure(message, options);
 			const restoredModel = this._restorePrimaryModelAfterBackup();
 			this._emit({
 				type: "auto_retry_end",
 				success: false,
 				attempt: this._retryAttempt - 1,
-				finalError: message.errorMessage,
+				finalError:
+					this._fallbackFailures.length > 0 ? this._formatFallbackExhaustion(message) : message.errorMessage,
 				...(restoredModel ? { restoredModel } : {}),
 			});
 			this._retryAttempt = 0;
@@ -12754,10 +12897,8 @@ export class AgentSession {
 
 		this._emit(emitStart);
 
-		const messages = this.agent.state.messages;
-		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-			this.agent.state.messages = messages.slice(0, -1);
-		}
+		// Remove error message from agent state (keep in session for history)
+		this._removeTrailingErrorMessage();
 
 		this._retryAbortController = new AbortController();
 		try {
@@ -12809,6 +12950,14 @@ export class AgentSession {
 		}, 0);
 
 		return true;
+	}
+
+	/** Drop a trailing assistant error from agent state; session history keeps it. */
+	private _removeTrailingErrorMessage(): void {
+		const messages = this.agent.state.messages;
+		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+			this.agent.state.messages = messages.slice(0, -1);
+		}
 	}
 
 	/**

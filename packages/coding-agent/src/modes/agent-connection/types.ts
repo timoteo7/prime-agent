@@ -176,6 +176,14 @@ export interface AgentConnectionModelChangeEntry extends AgentConnectionSessionE
 	modelId: string;
 }
 
+export interface AgentConnectionModelSwitchEntry extends AgentConnectionSessionEntryBase {
+	type: "model_switch";
+	from: string;
+	to: string;
+	reason: string;
+	attempt: number;
+}
+
 export interface AgentConnectionCompactionEntry extends AgentConnectionSessionEntryBase {
 	type: "compaction";
 	summary: string;
@@ -250,6 +258,7 @@ export type AgentConnectionSessionEntry =
 	| AgentConnectionThinkingLevelChangeEntry
 	| AgentConnectionServiceTierChangeEntry
 	| AgentConnectionModelChangeEntry
+	| AgentConnectionModelSwitchEntry
 	| AgentConnectionCompactionEntry
 	| AgentConnectionBranchSummaryEntry
 	| AgentConnectionCustomEntry
@@ -619,6 +628,7 @@ export type AgentConnectionSessionEvent =
 			/** "provider/model-id" restored after a backup-model retry succeeded. */
 			restoredModel?: string;
 	  }
+	| { type: "model_switch"; from: string; to: string; reason: string; attempt: number }
 	| { type: "auth_stale"; provider: string; sourceTokens?: readonly AuthSourceToken[] }
 	| { type: "rlm_child_update"; child: AgentConnectionRlmChildAgentSnapshot }
 	| { type: "rlm_progress_note"; message: string; timestamp: number }
