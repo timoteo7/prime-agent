@@ -74,6 +74,9 @@ export function classifyStreamFailure(providerErrorType?: string, status?: numbe
 		return "safety";
 	}
 	if (type.includes("overloaded") || status === 529) return "overloaded";
+	// Cline can return quota exhaustion as a misleading 401/403 Unauthorized
+	// response. Preserve the provider's quota signal so callers can fail over.
+	if (/inference_cap|daily free limit|free limit reached|quota exceeded/.test(type)) return "rate_limit";
 	// usage_not_included is Codex's plan-entitlement rejection, not bad credentials.
 	if (/rate_limit|usage_limit|usage_not_included|throttl/.test(type) || status === 429) {
 		return "rate_limit";

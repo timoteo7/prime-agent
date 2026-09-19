@@ -46,6 +46,7 @@ describe("classifyStreamFailure", () => {
 		["overloaded_error", undefined, "overloaded"],
 		[undefined, 529, "overloaded"],
 		["rate_limit_error", undefined, "rate_limit"],
+		["INFERENCE_CAP_ERROR: Daily free limit reached on model example-model", 401, "rate_limit"],
 		["usage_limit_reached", undefined, "rate_limit"],
 		["usage_not_included", 403, "rate_limit"],
 		[undefined, 429, "rate_limit"],
