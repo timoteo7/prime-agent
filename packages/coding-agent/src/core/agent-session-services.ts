@@ -57,6 +57,8 @@ export interface AgentSessionCreationOptions {
 	thinkingLevel?: ThinkingLevel;
 	serviceTier?: ServiceTier;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	/** Ordered failover chain used when the retry policy is exhausted. */
+	fallbackModels?: Model<any>[];
 	tools?: string[];
 	noTools?: "all" | "builtin";
 	customTools?: ToolDefinition[];
@@ -261,6 +263,7 @@ export async function createAgentSessionFromServices(
 		thinkingLevel: options.thinkingLevel,
 		serviceTier: options.serviceTier,
 		scopedModels: options.scopedModels,
+		fallbackModels: options.fallbackModels,
 		tools: options.tools,
 		noTools: options.noTools,
 		customTools: options.customTools,

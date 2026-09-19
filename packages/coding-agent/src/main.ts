@@ -58,7 +58,13 @@ import type { ExtensionFactory } from "./core/extensions/types.js";
 import { KeybindingsManager } from "./core/keybindings.js";
 import { installFileLogSink, setLogContext } from "./core/logging.js";
 import type { ModelRegistry } from "./core/model-registry.js";
-import { findInitialModel, resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
+import {
+	findInitialModel,
+	resolveCliModel,
+	resolveFallbackModels,
+	resolveModelScope,
+	type ScopedModel,
+} from "./core/model-resolver.js";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
 import type { CreateAgentSessionOptions } from "./core/sdk.js";
 import {
@@ -669,6 +675,7 @@ function runtimeConfigFromArgs(
 		appendSystemPrompt: parsed.appendSystemPrompt,
 		thinking: parsed.thinking,
 		models: parsed.models,
+		fallbackModels: parsed.fallbackModels,
 		tools: parsed.tools,
 		noTools: parsed.noTools,
 		noBuiltinTools: parsed.noBuiltinTools,
@@ -697,6 +704,7 @@ function runtimeConfigFromArgs(
 interface PreparedRuntimeServices {
 	services: AgentSessionServices;
 	scopedModels: ScopedModel[];
+	fallbackModels: Model<Api>[];
 	sessionOptions: CreateAgentSessionOptions;
 	cliThinkingFromModel: boolean;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
@@ -715,6 +723,7 @@ export function resolveRuntimeSessionOptions(
 		thinkingLevel: runtimeSessionOptions?.thinkingLevel ?? sessionOptions.thinkingLevel,
 		serviceTier: runtimeSessionOptions?.serviceTier ?? sessionOptions.serviceTier,
 		scopedModels: runtimeSessionOptions?.scopedModels ?? sessionOptions.scopedModels,
+		fallbackModels: runtimeSessionOptions?.fallbackModels ?? sessionOptions.fallbackModels,
 		tools: runtimeSessionOptions?.tools ?? sessionOptions.tools,
 		noTools: runtimeSessionOptions?.noTools ?? sessionOptions.noTools,
 		customTools: runtimeSessionOptions?.customTools ?? sessionOptions.customTools,
@@ -850,6 +859,18 @@ async function prepareRuntimeServices(options: {
 	const modelPatterns = config.models ?? settingsManager.getEnabledModels();
 	const scopedModels =
 		modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
+
+	// CLI --fallback-models overrides the settings.json chain.
+	const fallbackModelEntries = config.fallbackModels ?? settingsManager.getFallbackModels() ?? [];
+	let fallbackModels: Model<Api>[] = [];
+	try {
+		fallbackModels = await resolveFallbackModels(fallbackModelEntries, modelRegistry);
+	} catch (error) {
+		diagnostics.push({
+			type: "error",
+			message: error instanceof Error ? error.message : String(error),
+		});
+	}
 	const {
 		options: sessionOptions,
 		cliThinkingFromModel,
@@ -861,6 +882,9 @@ async function prepareRuntimeServices(options: {
 		modelRegistry,
 		settingsManager,
 	);
+	// The chain is resolved against the registry above; buildSessionOptions
+	// does not know it, so attach it here to carry it through session creation.
+	sessionOptions.fallbackModels = fallbackModels;
 	diagnostics.push(...sessionOptionDiagnostics);
 
 	const effectiveSessionModel = options.sessionOptionsOverride?.model ?? sessionOptions.model;
@@ -878,6 +902,7 @@ async function prepareRuntimeServices(options: {
 	return {
 		services,
 		scopedModels,
+		fallbackModels,
 		sessionOptions,
 		cliThinkingFromModel,
 		diagnostics,
