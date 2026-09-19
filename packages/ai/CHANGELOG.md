@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Fixed Cline quota errors mislabeled as authentication failures when the provider returns an Unauthorized response.
+
 ## [0.9.5] - 2026-09-15
 
 - Changed the build to compile from the committed model catalog instead of refetching it; run `npm run generate-models` explicitly to refresh `models.generated.ts`.

@@ -1,0 +1,1 @@
+- Fixed Cline quota errors being displayed as authentication failures when the provider returns an Unauthorized response.
