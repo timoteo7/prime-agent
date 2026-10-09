@@ -97,6 +97,7 @@ cp permission-gate.ts ~/.prime/agent/extensions/
 | Extension | Description |
 |-----------|-------------|
 | `mac-system-theme.ts` | Syncs the Prime Agent theme with macOS dark/light mode |
+| `herdr-agent-state.ts` | Reports pane state, session identity and a `resume_argv` command to Herdr, so a Herdr server restart restores the same conversation in the same pane (replaces the built-in Herdr reporter when installed under this name) |
 
 ### Resources
 
