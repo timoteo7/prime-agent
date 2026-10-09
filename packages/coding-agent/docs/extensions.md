@@ -50,6 +50,7 @@ See [examples/extensions/](../examples/extensions/) for working implementations.
 - [Custom UI](#custom-ui)
 - [Error Handling](#error-handling)
 - [Mode Behavior](#mode-behavior)
+- [Herdr Integration](#herdr-integration)
 - [Examples Reference](#examples-reference)
 
 ## Quick Start
@@ -2554,6 +2555,10 @@ const highlighted = highlightCode(code, lang, theme);
 | Print (`-p`) | No-op | Extensions run but can't prompt |
 
 In non-interactive modes, check `ctx.hasUI` before using UI methods.
+
+## Herdr Integration
+
+Inside a Herdr pane (`HERDR_ENV=1` with `HERDR_SOCKET_PATH` and `HERDR_PANE_ID` set), a built-in extension reports pane state to Herdr under the custom `prime-herdr` source. Reports carry a `resume_argv` (`prime-agent -r <session file>`, pinning the reporter-process `TMPDIR` (daemon `TMPDIR` in daemon mode) on POSIX because the daemon socket dir is TMPDIR-scoped), so a Herdr server restart restores the same conversation in the same pane. The resume command is advertised only for persisted sessions — a `--no-session` memory-only id is never reported as resumable. The built-in steps aside when Herdr's own file-based integration (`herdr integration install pi`) is loaded. `HERDR_PI_IDLE_DEBOUNCE_MS` and `HERDR_PI_RETRY_GRACE_MS` tune the idle debounce and the provider-error retry hold. No setup is required; outside a Herdr pane the extension is a no-op.
 
 ## Examples Reference
 
