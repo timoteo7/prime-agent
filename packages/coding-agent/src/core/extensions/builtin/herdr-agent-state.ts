@@ -5,6 +5,8 @@
  * workspace manager via its Unix socket. This is the in-tree equivalent of
  * the extension that `herdr integration install pi` writes, so Prime Agent
  * works inside Herdr panes out of the box without a manual install step.
+ * Reports carry a `resume_argv` for persisted sessions, so a Herdr server
+ * restart restores the same conversation in the same pane.
  *
  * Unlike the file-based integration (re-evaluated per session load by jiti),
  * this module is statically imported and evaluated once per process. All env
@@ -25,9 +27,9 @@ type AgentState = "working" | "blocked" | "idle";
 /**
  * True when Herdr's own file-based Pi integration (`herdr integration
  * install pi`) is among the extension files the loader actually loaded this
- * cycle. That extension reports with the same `herdr:pi` source but its own
- * seq counter, so running the built-in alongside it would make the two
- * reporters race on one pane.
+ * cycle. That extension claims the pane with its own source and seq counter,
+ * so running the built-in alongside it would make the two reporters
+ * race on one pane.
  *
  * Loaded paths — not raw disk existence — are the deferral source of truth:
  * a file that exists but never loads (settings `!` overrides, noExtensions,
@@ -50,6 +52,37 @@ export function herdrSocketTarget(socketPath: string, platform: NodeJS.Platform 
 		return socketPath;
 	}
 	return win32.join("\\\\.\\pipe\\", socketPath);
+}
+
+/** Herdr argv validation: no apostrophes/control chars (C0/C1), at most 64 args, at most 8KiB of UTF-8. */
+const HERDR_ARGV_UNSAFE = /['\u0000-\u001f\u007f-\u009f]/;
+
+/**
+ * Resume command for Herdr to run in the restored pane. Only persisted
+ * sessions are resumable — a `getSessionFile()` path — so memory-only ids
+ * (e.g. `--no-session`) never get one. On POSIX the reporter-process TMPDIR
+ * (daemon TMPDIR in daemon mode) is pinned because the daemon socket dir is TMPDIR-scoped.
+ */
+function herdrResumeArgv(
+	ref: string | undefined,
+	launchTmpdir: string | undefined,
+	platform: NodeJS.Platform = process.platform,
+): string[] | undefined {
+	if (!ref) {
+		return undefined;
+	}
+	const argv =
+		platform !== "win32" && launchTmpdir
+			? ["env", `TMPDIR=${launchTmpdir}`, "prime-agent", "-r", ref]
+			: ["prime-agent", "-r", ref];
+	if (
+		argv.length > 64 ||
+		argv.reduce((total, entry) => total + Buffer.byteLength(entry, "utf8"), 0) > 8 * 1024 ||
+		argv.some((entry) => HERDR_ARGV_UNSAFE.test(entry))
+	) {
+		return undefined;
+	}
+	return argv;
 }
 
 interface QueuedState {
@@ -137,12 +170,15 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 	// session's own Herdr pane rather than the daemon's startup environment.
 	const socketPath = process.env.HERDR_SOCKET_PATH;
 	const paneId = process.env.HERDR_PANE_ID;
+	// Reporter-process TMPDIR (daemon TMPDIR in daemon mode), not a forwarded
+	// client's TMPDIR: withClientEnv only overrides HERDR_*.
+	const launchTmpdir = process.env.TMPDIR;
 	const enabled = process.env.HERDR_ENV === "1" && !!socketPath && !!paneId;
 	if (!enabled || hasFileBasedHerdrIntegration(getLoadedExtensionPaths())) {
 		return;
 	}
 
-	const source = "herdr:pi";
+	const source = "prime-herdr";
 	const agentLabel = "prime-agent";
 	const idleDebounceMs = parseDurationEnv("HERDR_PI_IDLE_DEBOUNCE_MS", 250);
 	const retryGraceMs = parseDurationEnv("HERDR_PI_RETRY_GRACE_MS", 2500);
@@ -201,7 +237,7 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 	function updateSessionRef(ctx: any): void {
 		try {
 			const file = ctx?.sessionManager?.getSessionFile?.();
-			currentAgentSessionPath = typeof file === "string" && file.startsWith("/") ? file : undefined;
+			currentAgentSessionPath = typeof file === "string" && file.length > 0 ? file : undefined;
 		} catch {
 			currentAgentSessionPath = undefined;
 		}
@@ -215,13 +251,13 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 	}
 
 	function withSessionRef(params: Record<string, unknown>): Record<string, unknown> {
-		if (currentAgentSessionPath) {
-			return { ...params, agent_session_path: currentAgentSessionPath };
-		}
-		if (currentAgentSessionId) {
-			return { ...params, agent_session_id: currentAgentSessionId };
-		}
-		return params;
+		const ref = currentAgentSessionPath
+			? { ...params, agent_session_path: currentAgentSessionPath }
+			: currentAgentSessionId
+				? { ...params, agent_session_id: currentAgentSessionId }
+				: params;
+		const resumeArgv = herdrResumeArgv(currentAgentSessionPath, launchTmpdir);
+		return resumeArgv ? { ...ref, resume_argv: resumeArgv } : ref;
 	}
 
 	function sendState(state: AgentState, message?: string, seq = nextReportSeq()): Promise<void> {
@@ -408,10 +444,17 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 		if (!isBoundSession(ctx)) {
 			return;
 		}
+		// A fresh turn supersedes whatever timers or failure holds the
+		// previous one left behind, before any conditional handling.
 		clearPendingTimers();
 		clearFailureState();
 		agentActive = true;
-		publishState();
+		// The bound session manager can switch files (/new, /resume, /fork):
+		// refresh the reference and force a report when it changed so the new
+		// identity and resume command reach Herdr even if the state is unchanged.
+		const before = currentAgentSessionPath ?? currentAgentSessionId;
+		updateSessionRef(ctx);
+		publishState(before !== (currentAgentSessionPath ?? currentAgentSessionId));
 	});
 
 	pi.on("agent_end", (event, ctx) => {

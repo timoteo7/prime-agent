@@ -107,6 +107,7 @@ describe("herdrAgentStateExtension", () => {
 		"HERDR_PI_IDLE_DEBOUNCE_MS",
 		"HERDR_PI_RETRY_GRACE_MS",
 		"PRIME_AGENT_CODING_AGENT_DIR",
+		"TMPDIR",
 	];
 
 	for (const key of envKeys) {
@@ -125,6 +126,7 @@ describe("herdrAgentStateExtension", () => {
 		process.env.HERDR_PANE_ID = "w1:p1";
 		process.env.PRIME_AGENT_CODING_AGENT_DIR = tempDir;
 		process.env.HERDR_PI_IDLE_DEBOUNCE_MS = "10";
+		delete process.env.TMPDIR; // resume-argv expectations must not depend on the ambient launch TMPDIR
 		for (const [key, value] of Object.entries(env)) process.env[key] = value;
 		return started;
 	}
@@ -286,6 +288,35 @@ describe("herdrAgentStateExtension", () => {
 
 		const seqs = requests.map((r) => r.params.seq as number);
 		expect(seqs[1]).toBeGreaterThan(seqs[0]);
+	});
+	it.each<[string, string | undefined, string | undefined, string[] | undefined]>([
+		["pins TMPDIR", "/tmp/s.jsonl", "/launch/td", ["env", "TMPDIR=/launch/td", "prime-agent", "-r", "/tmp/s.jsonl"]],
+		["no resume when unpersisted", undefined, "/launch/td", undefined],
+		["no resume for invalid refs", "/tmp/bad'ref.jsonl", "/launch/td", undefined],
+		["no resume for C1 control refs", "/tmp/s\u0085.jsonl", "/launch/td", undefined],
+		["no resume when argv exceeds 8KiB UTF-8", "/tmp/s.jsonl", `/tmp/${"传".repeat(3000)}`, undefined],
+	])("%s", async (_label, file, launchTmpdir, expectedArgv) => {
+		const { requests, waitForRequests } = await setupHerdr(launchTmpdir ? { TMPDIR: launchTmpdir } : {});
+		const { pi, handlers } = createMockPi();
+		herdrAgentStateExtension(pi);
+		process.env.TMPDIR = "/mutated-after-factory"; // the captured reporter-process TMPDIR stays pinned
+		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, sessionCtx(file, "s"));
+		await waitForRequests(1);
+		expect(requests[0]?.params.resume_argv).toEqual(expectedArgv);
+	});
+	it("refreshes the session ref and stays working when the bound session changes", async () => {
+		const { requests, waitForRequests } = await setupHerdr();
+		const { pi, handlers } = createMockPi();
+		herdrAgentStateExtension(pi);
+		let file: string | undefined = "/tmp/first.jsonl";
+		const ctx = { sessionManager: { getSessionFile: () => file, getSessionId: () => "s" }, isIdle: () => false };
+		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "reload" }, ctx);
+		await waitForRequests(1);
+		file = "/tmp/second.jsonl"; // the bound manager can switch files (/new, /resume, /fork)
+		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
+		await waitForRequests(2);
+		expect(requests[1]).toMatchObject({ params: { state: "working", agent_session_path: "/tmp/second.jsonl" } });
+		expect(requests[1]?.params.resume_argv).toEqual(["prime-agent", "-r", "/tmp/second.jsonl"]);
 	});
 });
 
