@@ -1,0 +1,1 @@
+- Added automatic Herdr pane restoration for saved Prime Agent conversations.
